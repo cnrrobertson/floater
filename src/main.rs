@@ -9,12 +9,14 @@ use zellij_utils::input::layout::PercentOrFixed;
 struct State {
     /// Parsed per-command configuration, keyed by command name (e.g. "lazygit")
     commands: HashMap<String, CommandConfig>,
-    /// Currently open pane IDs per command name
-    open_panes: HashMap<String, Vec<u32>>,
+    /// Currently open pane IDs per (tab_index, command name)
+    open_panes: HashMap<(usize, String), Vec<u32>>,
     /// CWD of the currently focused pane, updated via CwdChanged events
     focused_pane_cwd: PathBuf,
     /// The pane ID that currently has focus (updated via PaneUpdate)
     focused_pane_id: Option<PaneId>,
+    /// Last known focused tab index (fallback cache updated via PaneUpdate)
+    focused_tab: usize,
 }
 
 #[derive(Clone)]
@@ -34,6 +36,9 @@ struct CommandConfig {
     mode: OpenMode,
     /// If true, open the command in the focused pane's cwd
     use_focused_cwd: bool,
+    /// If true, also pass the resolved cwd as the first positional argument
+    /// (needed for commands like yazi that use argv[1] rather than process cwd)
+    cwd_as_arg: bool,
 }
 
 #[derive(Clone)]
@@ -69,7 +74,6 @@ impl ZellijPlugin for State {
             EventType::PermissionRequestResult,
         ]);
         self.commands = parse_config(&config);
-        eprintln!("[floater] load() called, parsed {} commands: {:?}", self.commands.len(), self.commands.keys().collect::<Vec<_>>());
         // Default cwd to home so it's never an empty path
         if let Some(home) = std::env::var_os("HOME") {
             self.focused_pane_cwd = PathBuf::from(home);
@@ -80,35 +84,36 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::CommandPaneOpened(pane_id, ctx) => {
-                eprintln!("[floater] CommandPaneOpened pane_id={} ctx={:?}", pane_id, ctx);
-                if let Some(name) = ctx.get("floater_cmd") {
+                if let (Some(name), Some(tab_str)) =
+                    (ctx.get("floater_cmd"), ctx.get("floater_tab"))
+                {
+                    let tab: usize = tab_str.parse().unwrap_or(0);
                     self.open_panes
-                        .entry(name.clone())
+                        .entry((tab, name.clone()))
                         .or_default()
                         .push(pane_id);
-                    eprintln!("[floater] tracking pane {} for cmd {:?}, total={}", pane_id, name, self.open_panes[name].len());
                 }
             }
-            Event::CommandPaneExited(pane_id, exit_code, ctx) => {
-                eprintln!("[floater] CommandPaneExited pane_id={} exit_code={:?} ctx={:?}", pane_id, exit_code, ctx);
-                if let Some(name) = ctx.get("floater_cmd") {
-                    if let Some(ids) = self.open_panes.get_mut(name) {
+            Event::CommandPaneExited(pane_id, _exit_code, ctx) => {
+                if let (Some(name), Some(tab_str)) =
+                    (ctx.get("floater_cmd"), ctx.get("floater_tab"))
+                {
+                    let tab: usize = tab_str.parse().unwrap_or(0);
+                    let key = (tab, name.clone());
+                    if let Some(ids) = self.open_panes.get_mut(&key) {
                         ids.retain(|&id| id != pane_id);
                     }
-                    eprintln!("[floater] closing pane {} (exit_code={:?})", pane_id, exit_code);
                     close_terminal_pane(pane_id);
                 }
             }
             Event::CwdChanged(_pane_id, new_cwd, _client_ids) => {
-                // Track the cwd whenever any focused pane's cwd changes.
-                // We use this for commands with use_focused_cwd=true.
                 self.focused_pane_cwd = new_cwd;
             }
             Event::PaneUpdate(manifest) => {
-                // Track which pane is focused so we can correlate CwdChanged
-                for (_tab_idx, panes) in &manifest.panes {
+                for (tab_idx, panes) in &manifest.panes {
                     for pane in panes {
                         if pane.is_focused && !pane.is_plugin {
+                            self.focused_tab = *tab_idx;
                             self.focused_pane_id = Some(PaneId::Terminal(pane.id));
                         }
                     }
@@ -125,8 +130,6 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         let name = pipe_message.name.as_str();
         let payload = pipe_message.payload.as_deref().unwrap_or("");
-        eprintln!("[floater] pipe() called: name={:?} payload={:?} known_commands={:?}", name, payload, self.commands.keys().collect::<Vec<_>>());
-        // Expected payload format: "cmd=<name>" e.g. "cmd=lazygit"
         let cmd_name = payload
             .strip_prefix("cmd=")
             .unwrap_or("")
@@ -134,17 +137,15 @@ impl ZellijPlugin for State {
             .to_string();
 
         if cmd_name.is_empty() {
-            eprintln!("[floater] pipe(): cmd_name empty, bailing");
             return false;
         }
 
-        eprintln!("[floater] pipe(): dispatching action={:?} cmd={:?}", name, cmd_name);
         match name {
             "open"     => self.do_open(&cmd_name),
             "toggle"   => self.do_toggle(&cmd_name),
             "close"    => self.do_close(&cmd_name),
             "closeall" => self.do_closeall(&cmd_name),
-            _ => { eprintln!("[floater] pipe(): unknown action {:?}", name); }
+            _ => {}
         }
         false // headless
     }
@@ -157,14 +158,29 @@ impl ZellijPlugin for State {
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 impl State {
+    /// Returns the currently focused (tab_index, PaneId).
+    /// Queries zellij synchronously; falls back to cached values from PaneUpdate.
+    fn current_focus(&self) -> (usize, Option<PaneId>) {
+        match get_focused_pane_info() {
+            Ok((tab, pane_id)) => (tab, Some(pane_id)),
+            Err(_) => (self.focused_tab, self.focused_pane_id),
+        }
+    }
+
+    /// Returns the currently focused tab index.
+    fn current_tab(&self) -> usize {
+        self.current_focus().0
+    }
+
     /// Open or focus depending on the command's configured mode.
     fn do_toggle(&mut self, name: &str) {
+        let tab = self.current_tab();
+        let key = (tab, name.to_string());
         let mode = self.commands.get(name).map(|c| c.mode.clone());
-        let open_count = self.open_panes.get(name).map(|v| v.len()).unwrap_or(0);
+        let open_count = self.open_panes.get(&key).map(|v| v.len()).unwrap_or(0);
 
         if mode == Some(OpenMode::Toggle) && open_count > 0 {
-            // Focus the most-recently opened instance
-            if let Some(&id) = self.open_panes[name].last() {
+            if let Some(&id) = self.open_panes[&key].last() {
                 focus_terminal_pane(id, true, false);
             }
         } else {
@@ -175,11 +191,12 @@ impl State {
     /// Always open a new staggered floating pane.
     fn do_open(&mut self, name: &str) {
         let Some(config) = self.commands.get(name).cloned() else {
-            eprintln!("[floater] do_open(): no config for {:?}, known={:?}", name, self.commands.keys().collect::<Vec<_>>());
             return;
         };
 
-        let open_count = self.open_panes.get(name).map(|v| v.len()).unwrap_or(0);
+        let (tab, live_pane_id) = self.current_focus();
+        let key = (tab, name.to_string());
+        let open_count = self.open_panes.get(&key).map(|v| v.len()).unwrap_or(0);
         let slot = open_count % config.max_stagger;
         let dx = slot * config.stagger_x;
         let dy = slot * config.stagger_y;
@@ -194,36 +211,49 @@ impl State {
         };
 
         let cwd = if config.use_focused_cwd {
-            Some(self.focused_pane_cwd.clone())
+            // Query live cwd from the focused pane; fall back to cached value
+            let pane_id = live_pane_id.or(self.focused_pane_id);
+            let live_cwd = pane_id.and_then(|pid| get_pane_cwd(pid).ok());
+            Some(live_cwd.unwrap_or_else(|| self.focused_pane_cwd.clone()))
         } else {
             None
         };
 
-        // Pass cmd name in context so we can correlate events back to this command
         let mut ctx = BTreeMap::new();
         ctx.insert("floater_cmd".to_string(), name.to_string());
+        ctx.insert("floater_tab".to_string(), tab.to_string());
+
+        // Build args: optionally prepend cwd as first positional arg
+        let mut args = config.args.clone();
+        if config.cwd_as_arg {
+            if let Some(ref cwd_path) = cwd {
+                args.insert(0, cwd_path.to_string_lossy().to_string());
+            }
+        }
 
         let cmd = CommandToRun {
             path: PathBuf::from(&config.executable),
-            args: config.args.clone(),
+            args,
             cwd,
         };
 
         open_command_pane_floating(cmd, Some(coords), ctx);
     }
 
-    /// Close the most-recently opened instance.
+    /// Close the most-recently opened instance on the current tab.
     fn do_close(&mut self, name: &str) {
-        if let Some(ids) = self.open_panes.get_mut(name) {
+        let key = (self.current_tab(), name.to_string());
+        if let Some(ids) = self.open_panes.get_mut(&key) {
             if let Some(id) = ids.pop() {
                 close_terminal_pane(id);
             }
         }
     }
 
-    /// Close all open instances of a command.
+    /// Close all open instances of a command on the current tab.
     fn do_closeall(&mut self, name: &str) {
-        if let Some(ids) = self.open_panes.remove(name) {
+        let key = (self.current_tab(), name.to_string());
+        if let Some(ids) = self.open_panes.remove(&key) {
             for id in ids {
                 close_terminal_pane(id);
             }
@@ -236,7 +266,6 @@ impl State {
 /// Parse the flat `BTreeMap<String, String>` from the KDL plugin block into
 /// per-command configs. Keys follow the pattern `{name}_{field}`.
 fn parse_config(config: &BTreeMap<String, String>) -> HashMap<String, CommandConfig> {
-    // Collect all command names (keys that end in "_cmd")
     let names: Vec<String> = config
         .keys()
         .filter_map(|k| k.strip_suffix("_cmd").map(|n| n.to_string()))
@@ -269,7 +298,9 @@ fn parse_config(config: &BTreeMap<String, String>) -> HashMap<String, CommandCon
             _ => OpenMode::Toggle,
         };
 
-        let use_focused_cwd = get("cwd").to_lowercase() == "focused";
+        let cwd_val = get("cwd").to_lowercase();
+        let use_focused_cwd = cwd_val == "focused" || cwd_val == "focused_arg";
+        let cwd_as_arg = cwd_val == "focused_arg";
 
         let stagger_x: usize = get("stagger_x").parse().unwrap_or(2);
         let stagger_y: usize = get("stagger_y").parse().unwrap_or(1);
@@ -292,6 +323,7 @@ fn parse_config(config: &BTreeMap<String, String>) -> HashMap<String, CommandCon
                 max_stagger,
                 mode,
                 use_focused_cwd,
+                cwd_as_arg,
             },
         );
     }
