@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 zellij-tile = "0.44.2"
-zellij-utils = "0.44.2"
+zellij-utils = "0.44.3"
