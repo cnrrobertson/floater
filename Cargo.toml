@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-zellij-tile = "0.44.2"
+zellij-tile = "0.44.3"
 zellij-utils = "0.44.2"
