@@ -13,8 +13,8 @@ A headless [Zellij](https://zellij.dev) plugin that manages floating panes for a
 
 ## Requirements
 
-- Zellij ≥ 0.44
-- Rust + `wasm32-wasip1` target (`rustup target add wasm32-wasip1`)
+- Zellij 0.44.x (plugin API is version-specific; other versions are not supported)
+- Rust + `wasm32-wasip1` target (`rustup target add wasm32-wasip1`) — only needed to build from source
 
 ## Installation
 
