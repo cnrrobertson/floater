@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
@@ -263,63 +264,95 @@ impl State {
 
 // ─── Config parsing ────────────────────────────────────────────────────────────
 
-/// Parse the flat `BTreeMap<String, String>` from the KDL plugin block into
-/// per-command configs. Keys follow the pattern `{name}_{field}`.
+/// TOML shape: top-level table where each key is a named command.
+#[derive(Deserialize)]
+struct TomlConfig {
+    #[serde(flatten)]
+    commands: HashMap<String, TomlCommand>,
+}
+
+#[derive(Deserialize)]
+struct TomlCommand {
+    cmd: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    x: Option<String>,
+    #[serde(default)]
+    y: Option<String>,
+    #[serde(default)]
+    w: Option<String>,
+    #[serde(default)]
+    h: Option<String>,
+    #[serde(default)]
+    stagger_x: Option<usize>,
+    #[serde(default)]
+    stagger_y: Option<usize>,
+    #[serde(default)]
+    max_stagger: Option<usize>,
+}
+
+/// Parse the KDL plugin block. Expects a single `config` key containing a
+/// TOML string with one section per named command.
+///
+/// Example KDL:
+/// ```kdl
+/// config r#"
+///   [lazygit]
+///   cmd = "lazygit"
+///   mode = "toggle"
+///   x = "10%"; y = "5%"; w = "80%"; h = "90%"
+///
+///   [yazi]
+///   cmd = "yazi"
+///   cwd = "focused_arg"
+/// "#
+/// ```
 fn parse_config(config: &BTreeMap<String, String>) -> HashMap<String, CommandConfig> {
-    let names: Vec<String> = config
-        .keys()
-        .filter_map(|k| k.strip_suffix("_cmd").map(|n| n.to_string()))
-        .collect();
+    let Some(toml_str) = config.get("config") else {
+        return HashMap::new();
+    };
+
+    let parsed: TomlConfig = match toml::from_str(toml_str) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
 
     let mut result = HashMap::new();
-
-    for name in names {
-        let get = |field: &str| -> String {
-            config
-                .get(&format!("{name}_{field}"))
-                .cloned()
-                .unwrap_or_default()
-        };
-
-        let executable = get("cmd");
-        if executable.is_empty() {
+    for (name, tc) in parsed.commands {
+        if tc.cmd.is_empty() {
             continue;
         }
 
-        let args_str = get("args");
-        let args: Vec<String> = if args_str.is_empty() {
-            vec![]
-        } else {
-            args_str.split_whitespace().map(|s| s.to_string()).collect()
-        };
-
-        let mode = match get("mode").to_lowercase().as_str() {
-            "open" | "alwaysopen" => OpenMode::AlwaysOpen,
+        let mode = match tc.mode.as_deref().map(str::to_lowercase).as_deref() {
+            Some("open") | Some("alwaysopen") => OpenMode::AlwaysOpen,
             _ => OpenMode::Toggle,
         };
 
-        let cwd_val = get("cwd").to_lowercase();
+        let cwd_val = tc.cwd.as_deref().map(str::to_lowercase).unwrap_or_default();
         let use_focused_cwd = cwd_val == "focused" || cwd_val == "focused_arg";
         let cwd_as_arg = cwd_val == "focused_arg";
 
-        let stagger_x: usize = get("stagger_x").parse().unwrap_or(2);
-        let stagger_y: usize = get("stagger_y").parse().unwrap_or(1);
-        let max_stagger: usize = {
-            let v: usize = get("max_stagger").parse().unwrap_or(5);
-            if v == 0 { 5 } else { v }
+        let max_stagger = match tc.max_stagger.unwrap_or(5) {
+            0 => 5,
+            v => v,
         };
 
         result.insert(
-            name.clone(),
+            name,
             CommandConfig {
-                executable,
-                args,
-                x:           parse_coord(&get("x")),
-                y:           parse_coord(&get("y")),
-                width:       parse_coord(&get("w")),
-                height:      parse_coord(&get("h")),
-                stagger_x,
-                stagger_y,
+                executable: tc.cmd,
+                args:       tc.args,
+                x:          parse_coord(tc.x.as_deref().unwrap_or("")),
+                y:          parse_coord(tc.y.as_deref().unwrap_or("")),
+                width:      parse_coord(tc.w.as_deref().unwrap_or("")),
+                height:     parse_coord(tc.h.as_deref().unwrap_or("")),
+                stagger_x:  tc.stagger_x.unwrap_or(2),
+                stagger_y:  tc.stagger_y.unwrap_or(1),
                 max_stagger,
                 mode,
                 use_focused_cwd,

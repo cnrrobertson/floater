@@ -38,32 +38,37 @@ Add to your `~/.config/zellij/config.kdl`:
 
 ### 1. Load the plugin
 
+Commands are configured as TOML sections inside a single `config` string. Add a `[name]` section for each command — no code changes or rebuilds needed to add new ones.
+
 ```kdl
 load_plugins {
-    "file:/Users/YOU/.config/zellij/plugins/floater.wasm" {
+    "file:~/.config/zellij/plugins/floater.wasm" {
         _allow_exec_host_cmd true
+        config r#"
+[lazygit]
+cmd = "lazygit"
+x = "8%"
+y = "8%"
+w = "80%"
+h = "80%"
+stagger_x = 2
+stagger_y = 1
+max_stagger = 5
+mode = "toggle"
+cwd = "focused"
 
-        lazygit_cmd         "lazygit"
-        lazygit_x           "8%"
-        lazygit_y           "8%"
-        lazygit_w           "80%"
-        lazygit_h           "80%"
-        lazygit_stagger_x   "2"
-        lazygit_stagger_y   "1"
-        lazygit_max_stagger "5"
-        lazygit_mode        "toggle"
-        lazygit_cwd         "focused"
-
-        yazi_cmd            "yazi"
-        yazi_x              "5%"
-        yazi_y              "5%"
-        yazi_w              "90%"
-        yazi_h              "90%"
-        yazi_stagger_x      "3"
-        yazi_stagger_y      "2"
-        yazi_max_stagger    "5"
-        yazi_mode           "toggle"
-        yazi_cwd            "focused"
+[yazi]
+cmd = "yazi"
+x = "5%"
+y = "5%"
+w = "90%"
+h = "90%"
+stagger_x = 3
+stagger_y = 2
+max_stagger = 5
+mode = "toggle"
+cwd = "focused_arg"
+        "#
     }
 }
 ```
@@ -89,21 +94,21 @@ shared_among "normal" "locked" {
 
 ## Config key reference
 
-Each command is configured with keys prefixed by its name (e.g. `lazygit_`):
+Each `[name]` section supports the following keys:
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `{name}_cmd` | Executable to run (required) | — |
-| `{name}_args` | Space-separated arguments | `""` |
-| `{name}_x` | X position: `"N%"` or `"N"` cols | `"10%"` |
-| `{name}_y` | Y position: `"N%"` or `"N"` rows | `"10%"` |
-| `{name}_w` | Width: `"N%"` or `"N"` cols | `"80%"` |
-| `{name}_h` | Height: `"N%"` or `"N"` rows | `"80%"` |
-| `{name}_stagger_x` | Cols to shift right per extra open instance | `2` |
-| `{name}_stagger_y` | Rows to shift down per extra open instance | `1` |
-| `{name}_max_stagger` | Wrap stagger index at this count | `5` |
-| `{name}_mode` | `"toggle"` or `"open"` | `"toggle"` |
-| `{name}_cwd` | `"focused"` = use focused pane's cwd; `""` = none | `""` |
+| `cmd` | Executable to run (required) | — |
+| `args` | Array of arguments, e.g. `["--config", "/path"]` | `[]` |
+| `x` | X position: `"N%"` or `"N"` cols | `"10%"` |
+| `y` | Y position: `"N%"` or `"N"` rows | `"10%"` |
+| `w` | Width: `"N%"` or `"N"` cols | `"80%"` |
+| `h` | Height: `"N%"` or `"N"` rows | `"80%"` |
+| `stagger_x` | Cols to shift right per extra open instance | `2` |
+| `stagger_y` | Rows to shift down per extra open instance | `1` |
+| `max_stagger` | Wrap stagger index at this count | `5` |
+| `mode` | `"toggle"` or `"open"` | `"toggle"` |
+| `cwd` | `"focused"` = use focused pane's cwd; `"focused_arg"` = also pass cwd as first arg (e.g. yazi); `""` = none | `""` |
 
 ## Pipe actions
 
