@@ -324,9 +324,13 @@ fn parse_config(config: &BTreeMap<String, String>) -> HashMap<String, CommandCon
 
     let mut result = HashMap::new();
     for (name, tc) in parsed.commands {
-        if tc.cmd.is_empty() {
+        let mut parts = tc.cmd.split_whitespace();
+        let executable = parts.next().unwrap_or("").to_string();
+        if executable.is_empty() {
             continue;
         }
+        let mut args: Vec<String> = parts.map(String::from).collect();
+        args.extend(tc.args);
 
         let mode = match tc.mode.as_deref().map(str::to_lowercase).as_deref() {
             Some("open") | Some("alwaysopen") => OpenMode::AlwaysOpen,
@@ -345,8 +349,8 @@ fn parse_config(config: &BTreeMap<String, String>) -> HashMap<String, CommandCon
         result.insert(
             name,
             CommandConfig {
-                executable: tc.cmd,
-                args:       tc.args,
+                executable,
+                args,
                 x:          parse_coord(tc.x.as_deref().unwrap_or("")),
                 y:          parse_coord(tc.y.as_deref().unwrap_or("")),
                 width:      parse_coord(tc.w.as_deref().unwrap_or("")),
