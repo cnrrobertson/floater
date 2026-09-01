@@ -12,6 +12,10 @@ struct State {
     commands: HashMap<String, CommandConfig>,
     /// Currently open pane IDs per (tab_index, command name)
     open_panes: HashMap<(usize, String), Vec<u32>>,
+    /// Monotonic stagger-slot counter per (tab_index, command name), incremented
+    /// synchronously on every `do_open` call so it can never race with the
+    /// async `CommandPaneOpened` event (see do_open for details).
+    stagger_counters: HashMap<(usize, String), usize>,
     /// CWD of the currently focused pane, updated via CwdChanged events
     focused_pane_cwd: PathBuf,
     /// The pane ID that currently has focus (updated via PaneUpdate)
@@ -89,10 +93,12 @@ impl ZellijPlugin for State {
                     (ctx.get("floater_cmd"), ctx.get("floater_tab"))
                 {
                     let tab: usize = tab_str.parse().unwrap_or(0);
-                    self.open_panes
-                        .entry((tab, name.clone()))
-                        .or_default()
-                        .push(pane_id);
+                    let ids = self.open_panes.entry((tab, name.clone())).or_default();
+                    ids.push(pane_id);
+                    eprintln!(
+                        "[floater-debug] CommandPaneOpened name={} tab={} pane_id={} open_count_now={}",
+                        name, tab, pane_id, ids.len()
+                    );
                 }
             }
             Event::CommandPaneExited(pane_id, _exit_code, ctx) => {
@@ -103,6 +109,9 @@ impl ZellijPlugin for State {
                     let key = (tab, name.clone());
                     if let Some(ids) = self.open_panes.get_mut(&key) {
                         ids.retain(|&id| id != pane_id);
+                        if ids.is_empty() {
+                            self.stagger_counters.remove(&key);
+                        }
                     }
                     close_terminal_pane(pane_id);
                 }
@@ -197,8 +206,17 @@ impl State {
 
         let (tab, live_pane_id) = self.current_focus();
         let key = (tab, name.to_string());
-        let open_count = self.open_panes.get(&key).map(|v| v.len()).unwrap_or(0);
-        let slot = open_count % config.max_stagger;
+
+        // Assign the stagger slot from a synchronous monotonic counter rather
+        // than the live `open_panes` count. The live count only updates once
+        // the async `CommandPaneOpened` event lands, which can race with a
+        // rapid second/third `do_open` call and cause two windows to land on
+        // the same slot. The counter, by contrast, always advances the moment
+        // a window is *requested*, so back-to-back opens are guaranteed
+        // distinct slots.
+        let counter = self.stagger_counters.entry(key.clone()).or_insert(0);
+        let slot = *counter % config.max_stagger;
+        *counter += 1;
         let dx = slot * config.stagger_x;
         let dy = slot * config.stagger_y;
 
@@ -248,6 +266,9 @@ impl State {
             if let Some(id) = ids.pop() {
                 close_terminal_pane(id);
             }
+            if ids.is_empty() {
+                self.stagger_counters.remove(&key);
+            }
         }
     }
 
@@ -259,6 +280,7 @@ impl State {
                 close_terminal_pane(id);
             }
         }
+        self.stagger_counters.remove(&key);
     }
 }
 
