@@ -2,13 +2,18 @@ cargo := `rustup which cargo`
 rustc := `rustup which rustc`
 
 install_dir := env('HOME') / ".config/zellij/plugins"
-wasm := "target/wasm32-wasip1/release/floater.wasm"
+# Build outside of any OneDrive-synced folder. OneDrive on macOS treats files
+# in `target/` as cloud placeholders and blocks the hardlink/rename dance
+# cargo does mid-build ("Operation not permitted"), so we keep the source
+# tree in OneDrive but redirect build output to local, unsynced disk.
+target_dir := env('HOME') / ".cache/cargo-target/floater"
+wasm := target_dir / "wasm32-wasip1/release/floater.wasm"
 
 build:
-    RUSTC={{rustc}} {{cargo}} build --release --target wasm32-wasip1
+    CARGO_TARGET_DIR={{target_dir}} RUSTC={{rustc}} {{cargo}} build --release --target wasm32-wasip1
 
 build-dev:
-    RUSTC={{rustc}} {{cargo}} build --target wasm32-wasip1
+    CARGO_TARGET_DIR={{target_dir}} RUSTC={{rustc}} {{cargo}} build --target wasm32-wasip1
 
 # Build and install to ~/.config/zellij/plugins/
 install: build
