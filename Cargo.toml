@@ -5,6 +5,6 @@ edition = "2021"
 
 [dependencies]
 zellij-tile = "0.44.2"
-zellij-utils = "0.44.3"
+zellij-utils = "0.45.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
